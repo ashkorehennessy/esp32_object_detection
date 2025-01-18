@@ -26,7 +26,6 @@
 #endif
 #include <driver/i2c_master.h>
 
-static const char *TAG = "example";
 
 // Using SPI2 in the example
 #define LCD_HOST    SPI2_HOST
@@ -37,13 +36,13 @@ static const char *TAG = "example";
 #define EXAMPLE_LCD_PIXEL_CLOCK_HZ     (20 * 1000 * 1000)
 #define EXAMPLE_LCD_BK_LIGHT_ON_LEVEL  1
 #define EXAMPLE_LCD_BK_LIGHT_OFF_LEVEL !EXAMPLE_LCD_BK_LIGHT_ON_LEVEL
-#define EXAMPLE_PIN_NUM_SCLK           3
-#define EXAMPLE_PIN_NUM_MOSI           45
-#define EXAMPLE_PIN_NUM_MISO           46
-#define EXAMPLE_PIN_NUM_LCD_DC         47
-#define EXAMPLE_PIN_NUM_LCD_RST        21
-#define EXAMPLE_PIN_NUM_LCD_CS         14
-#define EXAMPLE_PIN_NUM_BK_LIGHT       0
+#define EXAMPLE_PIN_NUM_SCLK           GPIO_NUM_3
+#define EXAMPLE_PIN_NUM_MOSI           GPIO_NUM_45
+#define EXAMPLE_PIN_NUM_MISO           GPIO_NUM_46
+#define EXAMPLE_PIN_NUM_LCD_DC         GPIO_NUM_47
+#define EXAMPLE_PIN_NUM_LCD_RST        GPIO_NUM_21
+#define EXAMPLE_PIN_NUM_LCD_CS         GPIO_NUM_14
+#define EXAMPLE_PIN_NUM_BK_LIGHT       GPIO_NUM_0
 
 // The pixel number in horizontal and vertical
 #if CONFIG_EXAMPLE_LCD_CONTROLLER_ILI9341
@@ -65,10 +64,11 @@ static const char *TAG = "example";
 
 #define CAM_WIDTH 240
 #define CAM_HEIGHT 240
-
+extern void yolo_inference(void *arg);
+static const char *TAG = "example";
 static SemaphoreHandle_t lvgl_mux = NULL;
 static i2c_master_bus_handle_t i2c_handle = NULL;
-
+camera_fb_t *pic = NULL;
 int64_t perf_start;
 int64_t perf_end;
 
@@ -109,7 +109,7 @@ void example_lvgl_unlock(void)
     xSemaphoreGiveRecursive(lvgl_mux);
 }
 
-static void example_lvgl_port_task(void *arg)
+static void display_task(void *arg)
 {
     ESP_LOGI(TAG, "Starting LVGL task");
     uint32_t task_delay_ms = EXAMPLE_LVGL_TASK_MAX_DELAY_MS;
@@ -157,7 +157,7 @@ void app_main(void)
         .pin_href = GPIO_NUM_7,    
         .pin_pclk = GPIO_NUM_13,     
         .xclk_freq_hz = 16000000,        
-        .ledc_timer = LEDC_TIMER_0,      
+        .ledc_timer = LEDC_TIMER_0,
         .ledc_channel = LEDC_CHANNEL_0,  
         .pixel_format = PIXFORMAT_RGB565,
         // .frame_size = FRAMESIZE_128X128, 
@@ -246,9 +246,9 @@ void app_main(void)
     lv_init();
     // alloc draw buffers used by LVGL
     // it's recommended to choose the size of the draw buffer(s) to be at least 1/10 screen sized
-    lv_color_t *buf1 = heap_caps_malloc(EXAMPLE_LCD_H_RES * 20 * sizeof(lv_color_t), MALLOC_CAP_DMA);
+    lv_color_t *buf1 = (lv_color_t *)heap_caps_malloc(EXAMPLE_LCD_H_RES * 20 * sizeof(lv_color_t), MALLOC_CAP_DMA);
     assert(buf1);
-    lv_color_t *buf2 = heap_caps_malloc(EXAMPLE_LCD_H_RES * 20 * sizeof(lv_color_t), MALLOC_CAP_DMA);
+    lv_color_t *buf2 = (lv_color_t *)heap_caps_malloc(EXAMPLE_LCD_H_RES * 20 * sizeof(lv_color_t), MALLOC_CAP_DMA);
     assert(buf2);
     // initialize LVGL draw buffers
     lv_disp_draw_buf_init(&disp_buf, buf1, buf2, EXAMPLE_LCD_H_RES * 20);
@@ -277,24 +277,32 @@ void app_main(void)
     lvgl_mux = xSemaphoreCreateRecursiveMutex();
     assert(lvgl_mux);
     ESP_LOGI(TAG, "Create LVGL task");
-    xTaskCreate(example_lvgl_port_task, "LVGL", EXAMPLE_LVGL_TASK_STACK_SIZE, NULL, EXAMPLE_LVGL_TASK_PRIORITY, NULL);
+    xTaskCreatePinnedToCore(
+        display_task,
+        "DisplayTask",
+        EXAMPLE_LVGL_TASK_STACK_SIZE,
+        NULL,
+        EXAMPLE_LVGL_TASK_PRIORITY,
+        NULL,
+        0
+    );
     ESP_LOGI(TAG, "Display LVGL Meter Widget");
     uint32_t cam_buff_size = CAM_WIDTH * CAM_HEIGHT * 2;
-    uint8_t *cbuf = heap_caps_malloc(cam_buff_size, MALLOC_CAP_SPIRAM);
-    camera_fb_t *pic;
-    if (example_lvgl_lock(-1)) {
-        lv_draw_label_dsc_t label_dsc;
-        lv_draw_label_dsc_init(&label_dsc);
-        label_dsc.color = lv_palette_main(LV_PALETTE_BLUE);
-        lv_obj_t * canvas = lv_canvas_create(lv_scr_act());
-        lv_canvas_set_buffer(canvas, cbuf, CAM_WIDTH, CAM_HEIGHT, LV_IMG_CF_TRUE_COLOR);
-        lv_obj_center(canvas);
-        lv_canvas_fill_bg(canvas, lv_palette_lighten(LV_PALETTE_GREY, 3), LV_OPA_COVER);
-        lv_canvas_draw_text(canvas, 0, 0, 240, &label_dsc, "Some text on text canvas ssssssssssssssssssssssssssssssss");
-        // Release the mutex
-        example_lvgl_unlock();
+    uint8_t *cbuf = (uint8_t *)heap_caps_malloc(cam_buff_size, MALLOC_CAP_SPIRAM);
+    if(!cbuf){
+        ESP_LOGE(TAG, "Failed to allocate memory for camera buffer");
+        return;
     }
-    vTaskDelay(5 / portTICK_PERIOD_MS);
+    
+    xTaskCreatePinnedToCore(
+        yolo_inference,
+        "YOLO Inference",
+        32768,
+        NULL,
+        1,
+        NULL,
+        1
+    );
     lv_obj_t * canvas = lv_canvas_create(lv_scr_act());
     lv_canvas_set_buffer(canvas, cbuf, CAM_WIDTH, CAM_HEIGHT, LV_IMG_CF_TRUE_COLOR);
     lv_obj_center(canvas);
@@ -313,3 +321,4 @@ void app_main(void)
         vTaskDelay(1);
     }
 }
+
