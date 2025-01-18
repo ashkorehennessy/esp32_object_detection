@@ -9,3 +9,4 @@ project(esp_yolo)
 
 
 target_link_libraries(${CMAKE_PROJECT_NAME}.elf PRIVATE ncnn)
+target_link_options(${CMAKE_PROJECT_NAME}.elf PRIVATE -Wl,--allow-multiple-definition)
