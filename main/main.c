@@ -24,7 +24,6 @@
 #elif CONFIG_EXAMPLE_LCD_CONTROLLER_GC9A01
 #include "esp_lcd_gc9a01.h"
 #endif
-#include <driver/i2c_master.h>
 
 
 // Using SPI2 in the example
@@ -67,7 +66,6 @@
 extern void yolo_inference(void *arg);
 static const char *TAG = "example";
 static SemaphoreHandle_t lvgl_mux = NULL;
-static i2c_master_bus_handle_t i2c_handle = NULL;
 camera_fb_t *pic = NULL;
 int64_t perf_start;
 int64_t perf_end;
@@ -131,20 +129,12 @@ static void display_task(void *arg)
 
 void app_main(void)
 {
-    const i2c_master_bus_config_t i2c_config = {
-        .i2c_port = 1,
-        .sda_io_num = GPIO_NUM_4,
-        .scl_io_num = GPIO_NUM_5,
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .flags.enable_internal_pullup = true,
-    };
-    ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_config, &i2c_handle));
-    const camera_config_t camera_config = {                                   
-        .pin_pwdn = GPIO_NUM_NC,         
-        .pin_reset = GPIO_NUM_NC,        
-        .pin_xclk = GPIO_NUM_15,     
-        .pin_sccb_sda = GPIO_NUM_NC,     
-        .pin_sccb_scl = GPIO_NUM_NC,     
+    const camera_config_t camera_config = {
+        .pin_pwdn = GPIO_NUM_NC,
+        .pin_reset = GPIO_NUM_NC,
+        .pin_xclk = GPIO_NUM_15,
+        .pin_sccb_sda = GPIO_NUM_4,
+        .pin_sccb_scl = GPIO_NUM_5,
         .pin_d7 = GPIO_NUM_16,         
         .pin_d6 = GPIO_NUM_17,         
         .pin_d5 = GPIO_NUM_18,         
