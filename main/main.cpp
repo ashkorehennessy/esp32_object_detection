@@ -18,6 +18,7 @@
 #include "esp_log.h"
 #include "lvgl.h"
 #include "esp_camera.h"
+#include "edge-impulse-sdk/classifier/ei_run_classifier.h"
 
 #if CONFIG_EXAMPLE_LCD_CONTROLLER_ILI9341
 #include "esp_lcd_ili9341.h"
@@ -37,13 +38,13 @@ static const char *TAG = "example";
 #define EXAMPLE_LCD_PIXEL_CLOCK_HZ     (20 * 1000 * 1000)
 #define EXAMPLE_LCD_BK_LIGHT_ON_LEVEL  1
 #define EXAMPLE_LCD_BK_LIGHT_OFF_LEVEL !EXAMPLE_LCD_BK_LIGHT_ON_LEVEL
-#define EXAMPLE_PIN_NUM_SCLK           3
-#define EXAMPLE_PIN_NUM_MOSI           45
-#define EXAMPLE_PIN_NUM_MISO           46
-#define EXAMPLE_PIN_NUM_LCD_DC         47
-#define EXAMPLE_PIN_NUM_LCD_RST        21
-#define EXAMPLE_PIN_NUM_LCD_CS         14
-#define EXAMPLE_PIN_NUM_BK_LIGHT       0
+#define EXAMPLE_PIN_NUM_SCLK           GPIO_NUM_3
+#define EXAMPLE_PIN_NUM_MOSI           GPIO_NUM_45
+#define EXAMPLE_PIN_NUM_MISO           GPIO_NUM_46
+#define EXAMPLE_PIN_NUM_LCD_DC         GPIO_NUM_47
+#define EXAMPLE_PIN_NUM_LCD_RST        GPIO_NUM_21
+#define EXAMPLE_PIN_NUM_LCD_CS         GPIO_NUM_14
+#define EXAMPLE_PIN_NUM_BK_LIGHT       GPIO_NUM_0
 
 // The pixel number in horizontal and vertical
 #if CONFIG_EXAMPLE_LCD_CONTROLLER_ILI9341
@@ -63,13 +64,16 @@ static const char *TAG = "example";
 #define EXAMPLE_LVGL_TASK_STACK_SIZE   (8 * 1024)
 #define EXAMPLE_LVGL_TASK_PRIORITY     2
 
-#define CAM_WIDTH 240
-#define CAM_HEIGHT 240
-
+#define CAM_WIDTH 96
+#define CAM_HEIGHT 96
+extern void detect_task(void *arg);
 static SemaphoreHandle_t lvgl_mux = NULL;
 
 int64_t perf_start;
 int64_t perf_end;
+
+uint8_t *cbuf;
+uint8_t *snapshot_buf;
 
 static bool example_notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx)
 {
@@ -128,7 +132,67 @@ static void example_lvgl_port_task(void *arg)
     }
 }
 
-void app_main(void)
+
+static int camera_get_data(size_t offset, size_t length, float *out_ptr)
+{
+    // we already have a RGB888 buffer, so recalculate offset into pixel index
+    size_t pixel_ix = offset * 3;
+    size_t pixels_left = length;
+    size_t out_ptr_ix = 0;
+
+    while (pixels_left != 0) {
+        out_ptr[out_ptr_ix] = (snapshot_buf[pixel_ix] << 16) + (snapshot_buf[pixel_ix + 1] << 8) + snapshot_buf[pixel_ix + 2];
+
+        // go to the next pixel
+        out_ptr_ix++;
+        pixel_ix+=3;
+        pixels_left--;
+    }
+    // and done!
+    return 0;
+}
+#define WIDTH 96
+#define HEIGHT 96
+void detect_task(void *arg)
+{
+    ei_impulse_result_t result = { 0 };
+    signal_t signal;
+    signal.total_length = impulse_609002_0.input_width * impulse_609002_0.input_height;
+    signal.get_data = &camera_get_data;
+    EI_IMPULSE_ERROR res = EI_IMPULSE_OK;
+    int err = 0;
+    size_t snapshot_size = WIDTH * HEIGHT * 3;
+    snapshot_buf = (uint8_t *)heap_caps_malloc(snapshot_size, MALLOC_CAP_SPIRAM);
+    if (snapshot_buf == NULL) {
+        ESP_LOGE("detect", "Failed to allocate snapshot buffer");
+        vTaskDelete(NULL);
+    }
+
+    while (1) {
+        fmt2rgb888((const uint8_t *)cbuf, (96*96*2), PIXFORMAT_RGB565, snapshot_buf);
+        res = run_classifier(&impulse_handle_609002_0, &signal, &result, false);
+        if(res != EI_IMPULSE_OK) {
+            ESP_LOGE("detect", "ERR: Failed to run classifier (%d)", res);
+            vTaskDelay(1);
+            continue;
+        }
+        ESP_LOGI("detect", "Predictions (DSP: %d ms., Classification: %d ms., Anomaly: %d ms.):",
+            result.timing.dsp, result.timing.classification, result.timing.anomaly);
+        bool bb_found = result.bounding_boxes[0].value > 0;
+        for (size_t ix = 0; ix < result.bounding_boxes_count; ix++) {
+            auto bb = result.bounding_boxes[ix];
+            if (bb.value == 0) {
+                continue;
+            }
+            ESP_LOGI("detect", "    %s (%f) [ x: %lu, y: %lu, width: %lu, height: %lu ]", bb.label, bb.value, bb.x, bb.y, bb.width, bb.height);
+        }
+        vTaskDelay(1);
+    }
+}
+void detect_setup(){
+
+}
+extern "C" void app_main(void)
 {
     const camera_config_t camera_config = {                                   
         .pin_pwdn = GPIO_NUM_NC,         
@@ -152,12 +216,12 @@ void app_main(void)
         .ledc_channel = LEDC_CHANNEL_0,  
         .pixel_format = PIXFORMAT_RGB565,
         // .frame_size = FRAMESIZE_128X128, 
-        .frame_size = FRAMESIZE_240X240, // FRAMESIZE_128X128
+        .frame_size = FRAMESIZE_96X96, // FRAMESIZE_128X128
         .jpeg_quality = 12,              
         .fb_count = 1,                   
         .fb_location = CAMERA_FB_IN_PSRAM,
-        .sccb_i2c_port = 1,    
         .grab_mode = CAMERA_GRAB_WHEN_EMPTY,
+        .sccb_i2c_port = 1,    
     };
     esp_err_t err = esp_camera_init(&camera_config);
     if (err != ESP_OK) {
@@ -174,16 +238,16 @@ void app_main(void)
 
     ESP_LOGI(TAG, "Turn off LCD backlight");
     gpio_config_t bk_gpio_config = {
+        .pin_bit_mask = 1ULL << EXAMPLE_PIN_NUM_BK_LIGHT,
         .mode = GPIO_MODE_OUTPUT,
-        .pin_bit_mask = 1ULL << EXAMPLE_PIN_NUM_BK_LIGHT
     };
     ESP_ERROR_CHECK(gpio_config(&bk_gpio_config));
 
     ESP_LOGI(TAG, "Initialize SPI bus");
     spi_bus_config_t buscfg = {
-        .sclk_io_num = EXAMPLE_PIN_NUM_SCLK,
         .mosi_io_num = EXAMPLE_PIN_NUM_MOSI,
         .miso_io_num = EXAMPLE_PIN_NUM_MISO,
+        .sclk_io_num = EXAMPLE_PIN_NUM_SCLK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
         .max_transfer_sz = EXAMPLE_LCD_H_RES * EXAMPLE_LCD_V_RES * sizeof(uint16_t),
@@ -193,15 +257,15 @@ void app_main(void)
     ESP_LOGI(TAG, "Install panel IO");
     esp_lcd_panel_io_handle_t io_handle = NULL;
     esp_lcd_panel_io_spi_config_t io_config = {
-        .dc_gpio_num = EXAMPLE_PIN_NUM_LCD_DC,
         .cs_gpio_num = EXAMPLE_PIN_NUM_LCD_CS,
-        .pclk_hz = EXAMPLE_LCD_PIXEL_CLOCK_HZ*2,
-        .lcd_cmd_bits = EXAMPLE_LCD_CMD_BITS,
-        .lcd_param_bits = EXAMPLE_LCD_PARAM_BITS,
+        .dc_gpio_num = EXAMPLE_PIN_NUM_LCD_DC,
         .spi_mode = 0,
+        .pclk_hz = EXAMPLE_LCD_PIXEL_CLOCK_HZ*2,
         .trans_queue_depth = 10,
         .on_color_trans_done = example_notify_lvgl_flush_ready,
         .user_ctx = &disp_drv,
+        .lcd_cmd_bits = EXAMPLE_LCD_CMD_BITS,
+        .lcd_param_bits = EXAMPLE_LCD_PARAM_BITS,
     };
     // Attach the LCD to the SPI bus
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &io_config, &io_handle));
@@ -237,9 +301,9 @@ void app_main(void)
     lv_init();
     // alloc draw buffers used by LVGL
     // it's recommended to choose the size of the draw buffer(s) to be at least 1/10 screen sized
-    lv_color_t *buf1 = heap_caps_malloc(EXAMPLE_LCD_H_RES * 20 * sizeof(lv_color_t), MALLOC_CAP_DMA);
+    lv_color_t *buf1 = (lv_color_t *)heap_caps_malloc(EXAMPLE_LCD_H_RES * 20 * sizeof(lv_color_t), MALLOC_CAP_DMA);
     assert(buf1);
-    lv_color_t *buf2 = heap_caps_malloc(EXAMPLE_LCD_H_RES * 20 * sizeof(lv_color_t), MALLOC_CAP_DMA);
+    lv_color_t *buf2 = (lv_color_t *)heap_caps_malloc(EXAMPLE_LCD_H_RES * 20 * sizeof(lv_color_t), MALLOC_CAP_DMA);
     assert(buf2);
     // initialize LVGL draw buffers
     lv_disp_draw_buf_init(&disp_buf, buf1, buf2, EXAMPLE_LCD_H_RES * 20);
@@ -268,10 +332,26 @@ void app_main(void)
     lvgl_mux = xSemaphoreCreateRecursiveMutex();
     assert(lvgl_mux);
     ESP_LOGI(TAG, "Create LVGL task");
-    xTaskCreate(example_lvgl_port_task, "LVGL", EXAMPLE_LVGL_TASK_STACK_SIZE, NULL, EXAMPLE_LVGL_TASK_PRIORITY, NULL);
+    xTaskCreatePinnedToCore(
+        example_lvgl_port_task,
+        "LVGL",
+        EXAMPLE_LVGL_TASK_STACK_SIZE,
+        NULL,
+        EXAMPLE_LVGL_TASK_PRIORITY,
+        NULL,
+        0
+    );
     ESP_LOGI(TAG, "Display LVGL Meter Widget");
     uint32_t cam_buff_size = CAM_WIDTH * CAM_HEIGHT * 2;
-    uint8_t *cbuf = heap_caps_malloc(cam_buff_size, MALLOC_CAP_SPIRAM);
+    cbuf = (uint8_t *)heap_caps_malloc(cam_buff_size, MALLOC_CAP_SPIRAM);
+    xTaskCreatePinnedToCore(detect_task,
+        "detect_task",
+        11111,
+        NULL,
+        5,
+        NULL,
+        1
+    );
     camera_fb_t *pic;
     if (example_lvgl_lock(-1)) {
         lv_draw_label_dsc_t label_dsc;
@@ -281,7 +361,7 @@ void app_main(void)
         lv_canvas_set_buffer(canvas, cbuf, CAM_WIDTH, CAM_HEIGHT, LV_IMG_CF_TRUE_COLOR);
         lv_obj_center(canvas);
         lv_canvas_fill_bg(canvas, lv_palette_lighten(LV_PALETTE_GREY, 3), LV_OPA_COVER);
-        lv_canvas_draw_text(canvas, 0, 0, 240, &label_dsc, "Some text on text canvas ssssssssssssssssssssssssssssssss");
+        lv_canvas_draw_text(canvas, 0, 0, 96, &label_dsc, "Some text on text canvas ssssssssssssssssssssssssssssssss");
         // Release the mutex
         example_lvgl_unlock();
     }

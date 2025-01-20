@@ -2,3 +2,6 @@
 build/
 components/
 managed_components/
+edge-impulse-sdk/
+tflite-model/
+model-parameters/
