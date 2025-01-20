@@ -67,7 +67,6 @@ static const char *TAG = "example";
 #define CAM_HEIGHT 240
 
 static SemaphoreHandle_t lvgl_mux = NULL;
-static i2c_master_bus_handle_t i2c_handle = NULL;
 
 int64_t perf_start;
 int64_t perf_end;
@@ -131,20 +130,12 @@ static void example_lvgl_port_task(void *arg)
 
 void app_main(void)
 {
-    const i2c_master_bus_config_t i2c_config = {
-        .i2c_port = 1,
-        .sda_io_num = GPIO_NUM_4,
-        .scl_io_num = GPIO_NUM_5,
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .flags.enable_internal_pullup = true,
-    };
-    ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_config, &i2c_handle));
     const camera_config_t camera_config = {                                   
         .pin_pwdn = GPIO_NUM_NC,         
         .pin_reset = GPIO_NUM_NC,        
         .pin_xclk = GPIO_NUM_15,     
-        .pin_sccb_sda = GPIO_NUM_NC,     
-        .pin_sccb_scl = GPIO_NUM_NC,     
+        .pin_sccb_sda = GPIO_NUM_4,     
+        .pin_sccb_scl = GPIO_NUM_5,     
         .pin_d7 = GPIO_NUM_16,         
         .pin_d6 = GPIO_NUM_17,         
         .pin_d5 = GPIO_NUM_18,         
@@ -156,25 +147,18 @@ void app_main(void)
         .pin_vsync = GPIO_NUM_6,   
         .pin_href = GPIO_NUM_7,    
         .pin_pclk = GPIO_NUM_13,     
-        .xclk_freq_hz = 16000000,        
+        .xclk_freq_hz = 20000000,        
         .ledc_timer = LEDC_TIMER_0,      
         .ledc_channel = LEDC_CHANNEL_0,  
         .pixel_format = PIXFORMAT_RGB565,
         // .frame_size = FRAMESIZE_128X128, 
         .frame_size = FRAMESIZE_240X240, // FRAMESIZE_128X128
-        .jpeg_quality = 0,              
-        .fb_count = 2,                   
+        .jpeg_quality = 12,              
+        .fb_count = 1,                   
         .fb_location = CAMERA_FB_IN_PSRAM,
         .sccb_i2c_port = 1,    
+        .grab_mode = CAMERA_GRAB_WHEN_EMPTY,
     };
-
-    ESP_LOGI(TAG, "Turn off LCD backlight");
-    gpio_config_t bk_gpio_config = {
-        .mode = GPIO_MODE_OUTPUT,
-        .pin_bit_mask = 1ULL << EXAMPLE_PIN_NUM_BK_LIGHT
-    };
-    ESP_ERROR_CHECK(gpio_config(&bk_gpio_config));
-
     esp_err_t err = esp_camera_init(&camera_config);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Camera Init Failed");
@@ -187,6 +171,13 @@ void app_main(void)
 
     static lv_disp_draw_buf_t disp_buf; // contains internal graphic buffer(s) called draw buffer(s)
     static lv_disp_drv_t disp_drv;      // contains callback functions
+
+    ESP_LOGI(TAG, "Turn off LCD backlight");
+    gpio_config_t bk_gpio_config = {
+        .mode = GPIO_MODE_OUTPUT,
+        .pin_bit_mask = 1ULL << EXAMPLE_PIN_NUM_BK_LIGHT
+    };
+    ESP_ERROR_CHECK(gpio_config(&bk_gpio_config));
 
     ESP_LOGI(TAG, "Initialize SPI bus");
     spi_bus_config_t buscfg = {
@@ -301,9 +292,9 @@ void app_main(void)
     while(1){
         pic = esp_camera_fb_get();
         if (pic) {
-            esp_camera_fb_return(pic);
             if (example_lvgl_lock(-1)) {
                 memcpy(cbuf, pic->buf, cam_buff_size);
+                esp_camera_fb_return(pic);
                 lv_obj_invalidate(canvas);
                 example_lvgl_unlock();
             }
